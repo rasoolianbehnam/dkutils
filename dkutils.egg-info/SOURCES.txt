@@ -1,0 +1,12 @@
+MANIFEST.in
+README.rst
+environment.yml
+setup.cfg
+setup.py
+dkutils/__init__.py
+dkutils/_version.py
+dkutils.egg-info/PKG-INFO
+dkutils.egg-info/SOURCES.txt
+dkutils.egg-info/dependency_links.txt
+dkutils.egg-info/not-zip-safe
+dkutils.egg-info/top_level.txt

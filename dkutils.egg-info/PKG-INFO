@@ -1,0 +1,11 @@
+Metadata-Version: 1.2
+Name: sample-project
+Version: 0.1.0.dev0
+Summary: Additive
+Home-page: UNKNOWN
+Author: Behnam Rasoolian
+License: UNKNOWN
+Description: TODO: Add README for the Acr Weights Calculator project.
+        
+Platform: UNKNOWN
+Requires-Python: >= 3.6
