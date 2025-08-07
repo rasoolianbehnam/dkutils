@@ -86,35 +86,32 @@ class ProphetModel:
         trend = yield from self.sample_trend()
         # intercept = yield from self.sample_intercept()
         noise_sigma = yield root(tfd.HalfNormal(scale=1.0, name="noise_sigma"))
-        nu = yield tfd.Exponential(0.2, name="nu").root
+        # nu = yield tfd.Exponential(0.2, name="nu").root
 
-        y_hat = exogenous + economy + seasonality + trend
+        y_hat = exogenous + seasonality + trend + economy
 
         y_hat = jnp.einsum("...n->n...", y_hat)[self.data.train.train.values]
         y_hat = jnp.einsum("n...->...n", y_hat)
         yield tfd.Independent(
-            tfd.StudentT(nu[..., None] + 1, y_hat, noise_sigma[..., None]),
+            tfd.Normal(y_hat, noise_sigma[..., None]),
             reinterpreted_batch_ndims=1,
             name="obs",
         )
 
     def get_exogenous(self, alpha, **kwargs):
+        # coeffs = jnp.array([1.0, 1, 1, -1, -1, 1, -1, -1, 1, 1, 1])
+        # alpha = coeffs * jnp.exp(alpha)
         exogenous = jnp.einsum("ij,...j->...i", self.X[:, [0, 1, 10]], alpha)
         return exogenous
 
     def sample_exogenous(self):
         d = 3  # self.X.shape[-1]
-        alpha_corr = yield tfd.CholeskyLKJ(d, 0.2, name="alpha_corr").root
-        alpha_sigma = yield tfd.HalfNormal(1).Sample(d, name="alpha_sigma").root
-        alpha_cov_tril = alpha_corr * alpha_sigma[..., None]
+        # alpha_corr = yield tfd.CholeskyLKJ(d, 0.2, name="alpha_corr").root
+        # alpha_sigma = yield tfd.HalfNormal(1).Sample(d, name="alpha_sigma").root
+        # alpha_cov_tril = alpha_corr * alpha_sigma[..., None]
 
-        # alpha_cov_tril = yield tfd.WishartTriL(
-        #     d + 4,
-        #     jnp.diag(jnp.ones(d) / 5),
-        #     input_output_cholesky=True,
-        #     name="alpha_cov_tril",
-        # ).root
-        alpha = yield tfd.MultivariateNormalTriL(0, alpha_cov_tril, name="alpha")
+        # alpha = yield tfd.MultivariateNormalTriL(0, alpha_cov_tril, name="alpha")
+        alpha = yield tfd.Normal(0, 0.5, name="alpha").Sample(d).root
         return self.get_exogenous(alpha)
 
     # def sample_exogenous(self, f=1):
@@ -170,7 +167,7 @@ class ProphetModel:
     def sample_trend(self):
         k = yield root(tfd.Normal(0, 1, name="k"))  # Slope at 0
         m = yield root(tfd.Normal(0, 1, name="m"))
-        tau = yield root(tfd.Exponential(80, name="tau"))
+        tau = yield root(tfd.Exponential(20, name="tau"))
         delta = yield root(
             tfd.Sample(tfd.Laplace(0.0, 1), sample_shape=self.A.shape[1], name="delta")
         )
