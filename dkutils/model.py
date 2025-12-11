@@ -23,6 +23,10 @@ XCOLS = [
 ]
 
 
+def resample(df):
+    return (df.resample("D").ffill() / 7).resample("M").sum()
+
+
 def get_week_of_month(s):
     out = (
         pd.DataFrame(
@@ -57,8 +61,9 @@ def event(self, n_dims=1, name=None):
 
 
 class ProphetModel:
-    def __init__(self, data):
+    def __init__(self, data, target_column="visit", xcols=None):
         self.data = data
+        self.target_column = target_column
         df = data.data
         trainInfo = data.train
         index = df.index.to_series()
@@ -71,8 +76,10 @@ class ProphetModel:
             trainInfo.changepoint[trainInfo.changepoint].index - start_day
         ).to_series().dt.days.values / scale
         self.A = (self.t[:, None] > self.s).astype("float32")
+        if xcols is None:
+            xcols = XCOLS
 
-        self.X = jnp.array(df[XCOLS].values.astype("float32"))
+        self.X = jnp.array(df[xcols].values.astype("float32"))
         self.seasonality_switch = data.train.seasonality_switch.values
         self.n_seasonality_switches = self.seasonality_switch.max() + 1
         self.changepoints = trainInfo.changepoint.cumsum().values * 0
@@ -82,29 +89,52 @@ class ProphetModel:
 
         seasonality = yield from self.sample_seasonality(hierarchical=False)
         exogenous = yield from self.sample_exogenous()
+        # economy = yield from self.sample_economy()
         trend = yield from self.sample_trend()
-        noise_sigma = yield root(tfd.HalfNormal(scale=1.0, name="noise_sigma"))
+        # intercept = yield from self.sample_intercept()
+        noise_sigma = yield root(
+            tfd.HalfNormal(scale=1.0, name=self.target_column + "_noise_sigma")
+        )
+        # nu = yield tfd.Exponential(0.2, name="nu").root
 
         y_hat = seasonality + trend + exogenous
 
         y_hat = jnp.einsum("...n->n...", y_hat)[self.data.train.train.values]
         y_hat = jnp.einsum("n...->...n", y_hat)
-        yield tfd.Independent(
+        obs = yield tfd.Independent(
             tfd.Normal(y_hat, noise_sigma[..., None]),
             reinterpreted_batch_ndims=1,
-            name="obs",
+            name=self.target_column + "_obs",
         )
+        return obs
 
     def get_exogenous(self, alpha, **kwargs):
-        exogenous = jnp.einsum("ij,...j->...i", self.X, alpha)
+        exogenous = jnp.einsum(
+            "...ij->...i", self.get_exogenous_components(alpha, **kwargs)
+        )
+        return exogenous
+
+    def get_exogenous_components(self, alpha, **kwargs):
+        # coeffs = jnp.array([1.0, 1, 1, -1, -1, 1, -1, -1, 1, 1, 1])
+        # alpha = coeffs * jnp.exp(alpha)
+        exogenous = jnp.einsum("ij,...j->...ij", self.X, alpha)
         return exogenous
 
     def sample_exogenous(self):
         d = self.X.shape[-1]
-        alpha = yield tfd.Normal(0, 0.5, name="alpha").Sample(d).root
+        # alpha_corr = yield tfd.CholeskyLKJ(d, 0.2, name=self.target_column+"_alpha_corr").root
+        # alpha_sigma = yield tfd.HalfNormal(1).Sample(d, name=self.target_column+"_alpha_sigma").root
+        # alpha_cov_tril = alpha_corr * alpha_sigma[..., None]
+
+        # alpha = yield tfd.MultivariateNormalTriL(0, alpha_cov_tril, name=self.target_column+"_alpha")
+        alpha = (
+            yield tfd.Normal(0, 0.1, name=self.target_column + "_alpha").Sample(d).root
+        )
         return self.get_exogenous(alpha)
 
-    def get_seasonality(self, beta_0, beta_1, beta, **kwarg):
+    def get_seasonality(self, beta, beta_0=None, beta_1=None, **kwarg):
+        beta_0 = beta_0 if beta_0 is not None else jnp.array(0.0)
+        beta_1 = beta_1 if beta_1 is not None else jnp.array(0.1)
         beta = beta * beta_1[..., None] + beta_0[..., None]
         beta = beta[..., self.seasonality_switch]
         seasonality = jnp.einsum("nd,...dn->...n", self.S, beta)
@@ -114,25 +144,29 @@ class ProphetModel:
         if hierarchical:
             beta_0 = yield root(
                 tfd.Sample(
-                    tfd.Normal(0.0, 0.1), sample_shape=self.S.shape[-1], name="beta_0"
+                    tfd.Normal(0.0, 0.1),
+                    sample_shape=self.S.shape[-1],
+                    name=self.target_column + "_beta_0",
                 )
             )
             beta_1 = yield root(
                 tfd.Sample(
-                    tfd.HalfNormal(0.1), sample_shape=self.S.shape[-1], name="beta_1"
+                    tfd.HalfNormal(0.1),
+                    sample_shape=self.S.shape[-1],
+                    name=self.target_column + "_beta_1",
                 )
             )
         else:
-            beta_0 = jnp.array(0)
-            beta_1 = jnp.array(0.1)
+            beta_0 = None
+            beta_1 = None
         beta = yield root(
             tfd.Sample(
                 tfd.Normal(0, 1),
                 sample_shape=[self.S.shape[-1], self.n_seasonality_switches],
-                name="beta",
+                name=self.target_column + "_beta",
             )
         )
-        return self.get_seasonality(beta_0, beta_1, beta)
+        return self.get_seasonality(beta_0=beta_0, beta_1=beta_1, beta=beta)
 
     def get_trend(self, k, m, tau, delta, **kwargs):
         delta = delta * tau[..., None]
@@ -142,33 +176,53 @@ class ProphetModel:
         return trend
 
     def sample_trend(self):
-        k = yield root(tfd.Normal(0, 1, name="k"))  # Slope at 0
-        m = yield root(tfd.Normal(0, 1, name="m"))
-        tau = yield root(tfd.Exponential(1, name="tau"))
-        delta = yield root(
+        k = yield root(tfd.Normal(0, 3, name=self.target_column + "_k"))  # Slope at 0
+        m = yield root(tfd.Normal(0, 3, name=self.target_column + "_m"))
+        tau = yield root(tfd.Exponential(5, name=self.target_column + "_tau"))
+        delta = yield (
             tfd.Sample(
-                tfd.Laplace(0.0, tau), sample_shape=self.A.shape[1], name="delta"
+                tfd.Laplace(0.0, tau),
+                sample_shape=self.A.shape[1],
+                name=self.target_column + "_delta",
             )
         )
         return self.get_trend(k, m, tau, delta)
 
     def sample_intercept(self):
         intercept = (
-            yield tfd.Normal(0, 1).Sample(self.n_changepoints, name="intercept").root
+            yield tfd.Normal(0, 1)
+            .Sample(self.n_changepoints, name=self.target_column + "_intercept")
+            .root
         )
         return intercept.cumsum(axis=-1)[..., self.changepoints]
 
     def sample_economy(self, hidden_dim=1):
         d = self.X.shape[-1]
         initial_state = (
-            yield tfd.Normal(0, 1).Sample(hidden_dim, name="hist_initial_state").root
+            yield tfd.Normal(0, 1)
+            .Sample(hidden_dim, name=self.target_column + "_hist_initial_state")
+            .root
         )
-        A = yield tfd.Normal(0, 1).Sample([d, hidden_dim], name="hist_A").root
+        A = (
+            yield tfd.Normal(0, 1)
+            .Sample([d, hidden_dim], name=self.target_column + "_hist_A")
+            .root
+        )
         A2 = (
-            yield tfd.Normal(0, 1).Sample([hidden_dim, hidden_dim], name="hist_A2").root
+            yield tfd.Normal(0, 1)
+            .Sample([hidden_dim, hidden_dim], name=self.target_column + "_hist_A2")
+            .root
         )
-        b = yield tfd.Normal(0, 1).Sample(hidden_dim, name="hist_b").root
-        O = yield tfd.Normal(0, 1, name="hist_O").Sample(hidden_dim + 1).root
+        b = (
+            yield tfd.Normal(0, 1)
+            .Sample(hidden_dim, name=self.target_column + "_hist_b")
+            .root
+        )
+        O = (
+            yield tfd.Normal(0, 1, name=self.target_column + "_hist_O")
+            .Sample(hidden_dim + 1)
+            .root
+        )
         return self.get_economy(initial_state, A, A2, b, O)
 
     def get_economy(self, initial_state, A, A2, b, O, **kwargs):
@@ -192,6 +246,6 @@ class ProphetModel:
         model = tfd.JointDistributionCoroutine(self.model)
         if pinned:
             return model.experimental_pin(
-                obs=data.data["visit"][data.train.train].values
+                obs=data.data[self.target_column][data.train.train].values
             )
         return model
