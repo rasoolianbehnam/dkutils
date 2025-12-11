@@ -246,6 +246,10 @@ class ProphetModel:
         model = tfd.JointDistributionCoroutine(self.model)
         if pinned:
             return model.experimental_pin(
-                obs=data.data[self.target_column][data.train.train].values
+                {
+                    f"{self.target_column}_obs": data.data[self.target_column][
+                        data.train.train
+                    ].values
+                }
             )
         return model
