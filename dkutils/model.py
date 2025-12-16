@@ -65,25 +65,29 @@ class ProphetModel:
         self.data = data
         self.target_column = target_column
         df = data.data
-        trainInfo = data.train
+        self.trainInfo = data.train.loc[data.data.index].copy()
         index = df.index.to_series()
-        start_day = df.index.min()
+        start_day = data.train.index.min()
         scale = 365.25 * 4
         t = (index - start_day).dt.days.values
         self.S = gen_fourier_basis(t, n=3).astype("float32")
         self.t = t / scale
         self.s = (
-            trainInfo.changepoint[trainInfo.changepoint].index - start_day
+            data.train.changepoint[data.train.changepoint].index - start_day
         ).to_series().dt.days.values / scale
         self.A = (self.t[:, None] > self.s).astype("float32")
         if xcols is None:
             xcols = XCOLS
 
         self.X = jnp.array(df[xcols].values.astype("float32"))
-        self.seasonality_switch = data.train.seasonality_switch.values
+        self.seasonality_switch = data.train.loc[
+            data.data.index
+        ].seasonality_switch.values
         self.n_seasonality_switches = self.seasonality_switch.max() + 1
-        self.changepoints = trainInfo.changepoint.cumsum().values * 0
-        self.n_changepoints = trainInfo.changepoint.sum() + 1
+        self.changepoints = (
+            data.train.changepoint.cumsum().loc[data.data.index].values * 0
+        )
+        self.n_changepoints = data.train.changepoint.sum() + 1
 
     def model(self):
 
@@ -99,7 +103,7 @@ class ProphetModel:
 
         y_hat = seasonality + trend + exogenous
 
-        y_hat = jnp.einsum("...n->n...", y_hat)[self.data.train.train.values]
+        y_hat = jnp.einsum("...n->n...", y_hat)[self.trainInfo.train.values]
         y_hat = jnp.einsum("n...->...n", y_hat)
         obs = yield tfd.Independent(
             tfd.Normal(y_hat, noise_sigma[..., None]),
@@ -248,7 +252,7 @@ class ProphetModel:
             return model.experimental_pin(
                 {
                     f"{self.target_column}_obs": data.data[self.target_column][
-                        data.train.train
+                        self.trainInfo.train
                     ].values
                 }
             )
