@@ -1,9 +1,11 @@
 import joblib
 import dataiku
 import os
+import tempfile
 
 import pandas as pd
 from io import StringIO
+from pathlib import Path
 
 
 def read_data(data_name):
@@ -26,16 +28,31 @@ def read_remote_csv(path):
     return pd.read_csv(market_inputs_imported)
 
 
-def read_remote_file(path, read_fn=joblib.load):
+def download_file(path, directory):
     folder, file = path.split("/")
-    with open("tmp", "wb") as f:
+    directory = Path(directory)
+    with open(directory / file, "wb") as f:
         f.write(dataiku.Folder(folder).get_download_stream(file).read())
-    return read_fn("tmp")
 
 
-def upload_to(obj, path, save_fn=joblib.dump):
+def read_obj(path, read_fn=joblib.load):
+    folder, file = path.split("/")
+    with tempfile.NamedTemporaryFile() as f:
+        f.write(dataiku.Folder(folder).get_download_stream(file).read())
+        out = read_fn(f.name)
+    return out
+
+
+def upload_file(file, path):
     dirname = os.path.dirname(path)
     basename = os.path.basename(path)
-    save_fn(obj, basename)
-    dataiku.Folder(dirname).upload_file(basename, basename)
-    os.remove(basename)
+    dataiku.Folder(dirname).upload_file(basename, file)
+
+
+def upload_obj(obj, path, save_fn=joblib.dump):
+    dirname = os.path.dirname(path)
+    basename = os.path.basename(path)
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_dir = Path(temp_dir)
+        save_fn(obj, temp_dir / basename)
+        dataiku.Folder(dirname).upload_file(basename, temp_dir / basename)
